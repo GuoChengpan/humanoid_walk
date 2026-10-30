@@ -1,0 +1,16 @@
+# humanoid_walk 训练与工具链依赖（本机实测版本，Python 3.12.3）
+#
+#   pip install -r requirements.txt
+#
+# torch 不在此文件内固定：本机用的是 CPU 构建（2.13.0+cpu），带 +cpu 的本地版本号
+# 会让 pip 走默认索引失败。请按自己的硬件从 https://pytorch.org/get-started/locally/
+# 选一条安装命令先装好 torch，再装本文件。
+
+mujoco==3.9.0
+gymnasium==1.3.0
+stable-baselines3==2.9.0
+numpy==2.4.6
+scipy==1.18.0
+matplotlib==3.11.1
+tensorboard==2.21.0
+imageio==2.37.4

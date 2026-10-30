@@ -1,0 +1,25 @@
+v1>v2
+v3 加了  reward = (forward_reward + 
+        height_reward + 
+        fall_penalty +
+        survival_bonus -
+        leg_activity_penalty -
+        ctrl_cost)
+        
+------------------------------------
+| eval/                 |          |
+|    mean_ep_length     | 954      |
+|    mean_reward        | 2.18e+03 |
+| gait/                 |          |
+|    left_hip_x         | 0.116    |
+|    left_knee          | 0.0484   |
+|    left_leg_activity  | 0.291    |
+|    left_ratio         | 0.769    |
+|    mean_left_swing    | 8        |
+|    mean_right_swing   | 12.1     |
+|    right_hip_x        | 0.143    |
+|    right_knee         | 0.0243   |
+|    right_leg_activity | 0.095    |
+|    right_ratio        | 0.526    |
+| time/                 |          |
+|    total_timesteps    | 1616000  |

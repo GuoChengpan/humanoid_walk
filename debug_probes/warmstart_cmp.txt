@@ -1,0 +1,50 @@
+/home/guo/tools_envs/mujoco_base/lib/python3.12/site-packages/gymnasium/envs/registration.py:513: DeprecationWarning: [33mWARN: The environment Humanoid-v4 is out of date. You should consider upgrading to version `v5`.[0m
+  logger.deprecation(
+/home/guo/tools_envs/mujoco_base/lib/python3.12/site-packages/gymnasium/envs/registration.py:513: DeprecationWarning: [33mWARN: The environment Humanoid-v4 is out of date. You should consider upgrading to version `v5`.[0m
+  logger.deprecation(
+候选（新奖励 det 1500 步 × 2 种子）
+
+model                         步数      摔      新回报 |  reachL  reachR     腾空     双撑 |  liftL   romL   romR |   advL   advR
+-----------------------------------------------------------------------------------------------------------------------
+Wrapping the env with a `Monitor` wrapper
+Wrapping the env in a DummyVecEnv.
+Wrapping the env with a `Monitor` wrapper
+Wrapping the env in a DummyVecEnv.
+944K 本run best              1500     ..     1727 |  -0.165  +0.046   0.51   0.00 |  0.182    7.1   65.6 |  0.334  0.238
+                           收支: reach奖 +1 | 滑罚 -138 | 飞罚 -376 | 髋税 -398 | 对称 -237 | 步奖 +141 | fwd +226 | 高度 +1400 | slipL 0.143 kneeExtL 50.7 kneeExtR 109.2
+                           zip内 num_timesteps=44000  两种子新回报 [1809, 1646]
+Wrapping the env with a `Monitor` wrapper
+Wrapping the env in a DummyVecEnv.
+Wrapping the env with a `Monitor` wrapper
+Wrapping the env in a DummyVecEnv.
+592K SAC_18/18_2            1500     ..     1952 |  -0.157  +0.045   0.52   0.00 |  0.183    8.6   64.5 |  0.306  0.230
+                           收支: reach奖 +0 | 滑罚 -137 | 飞罚 -382 | 髋税 -510 | 对称 -281 | 步奖 +218 | fwd +368 | 高度 +1403 | slipL 0.137 kneeExtL 58.3 kneeExtR 104.9
+                           zip内 num_timesteps=92000  两种子新回报 [2033, 1871]
+Wrapping the env with a `Monitor` wrapper
+Wrapping the env in a DummyVecEnv.
+Wrapping the env with a `Monitor` wrapper
+Wrapping the env in a DummyVecEnv.
+608K SAC_18/18_3_min步幅      1500     ..     2103 |  -0.153  +0.051   0.46   0.00 |  0.204    3.2   67.5 |  0.316  0.222
+                           收支: reach奖 +0 | 滑罚 -140 | 飞罚 -375 | 髋税 -378 | 对称 -317 | 步奖 +236 | fwd +369 | 高度 +1384 | slipL 0.131 kneeExtL 60.6 kneeExtR 104.0
+                           zip内 num_timesteps=8000  两种子新回报 [2052, 2154]
+Wrapping the env with a `Monitor` wrapper
+Wrapping the env in a DummyVecEnv.
+Wrapping the env with a `Monitor` wrapper
+Wrapping the env in a DummyVecEnv.
+1792K SAC_18/18_1_镜像增广       772     .Y      772 |  -0.175  -0.054   0.47   0.05 |  0.125   14.7   38.8 |  0.159  0.167
+                           收支: reach奖 +0 | 滑罚 -142 | 飞罚 -360 | 髋税 -378 | 对称 -427 | 步奖 +98 | fwd +227 | 高度 +1340 | slipL 0.135 kneeExtL 47.4 kneeExtR 105.3
+                           zip内 num_timesteps=792000  两种子新回报 [1588, -44]
+Wrapping the env with a `Monitor` wrapper
+Wrapping the env in a DummyVecEnv.
+Wrapping the env with a `Monitor` wrapper
+Wrapping the env in a DummyVecEnv.
+1472K 17_6_最终版_swap           50     YY      -52 |  -0.272  -0.103   0.42   0.10 |  0.133   14.6   23.2 |  0.140  0.104
+                           收支: reach奖 +0 | 滑罚 -5 | 飞罚 -12 | 髋税 -19 | 对称 -13 | 步奖 +0 | fwd +0 | 高度 +34 | slipL 0.150 kneeExtL 32.3 kneeExtR 18.9
+                           zip内 num_timesteps=472000  两种子新回报 [-53, -51]
+Wrapping the env with a `Monitor` wrapper
+Wrapping the env in a DummyVecEnv.
+Wrapping the env with a `Monitor` wrapper
+Wrapping the env in a DummyVecEnv.
+2.7M 17_4                   1500     ..      710 |  -0.179  +0.076   0.51   0.00 |  0.164   14.5   52.4 |  0.292  0.141
+                           收支: reach奖 +4 | 滑罚 -139 | 飞罚 -364 | 髋税 -968 | 对称 -472 | 步奖 +60 | fwd +148 | 高度 +1357 | slipL 0.115 kneeExtL 58.7 kneeExtR 73.0
+                           zip内 num_timesteps=704000  两种子新回报 [888, 533]

@@ -1,0 +1,742 @@
+import os,json
+import gymnasium as gym
+import numpy as np
+import torch.nn as nn
+from gymnasium import Wrapper
+from collections import deque
+from scipy.spatial.transform import Rotation
+from stable_baselines3 import SAC,PPO  # 改为 SAC
+from stable_baselines3.common.vec_env import SubprocVecEnv,VecMonitor
+from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.callbacks import EvalCallback, StopTrainingOnRewardThreshold,BaseCallback,CallbackList
+
+
+class LegActivityCallback(BaseCallback):
+    def __init__(self, verbose=0):
+        super().__init__(verbose)
+        self.last_gait_data = {}  # 新增：保存最近记录的 gait 指标
+
+    def _on_step(self):
+        infos = self.locals["infos"]
+        for info in infos:
+            if "left_leg_activity" in info:
+                # 记录到 logger（保持不变）
+                self.logger.record("gait/left_leg_activity", info["left_leg_activity"])
+                self.logger.record("gait/right_leg_activity", info["right_leg_activity"])
+                self.logger.record("gait/foot_bias_penalty", info["foot_bias_penalty"])
+                self.logger.record("gait/phase_reward", info["phase_reward"])
+                self.logger.record("gait/activity_difference", info["activity_difference"])
+                self.logger.record("gait/left_swing_ratio", info["left_swing_ratio"])
+                self.logger.record("gait/right_swing_ratio", info["right_swing_ratio"])
+                self.logger.record("gait/left_ratio", info["left_ratio"])
+                self.logger.record("gait/right_ratio", info["right_ratio"])
+                self.logger.record("gait/mean_left_swing", info["mean_left_swing"])
+                self.logger.record("gait/mean_right_swing", info["mean_right_swing"])
+                self.logger.record("gait/support_sym_penalty",info["support_sym_penalty"])
+                self.logger.record("gait/lateral_pos", info["lateral_pos"])
+                self.logger.record("gait/lateral_vel",info["lateral_vel"])
+
+                self.logger.record("gait/stride_balance_penalty",info["stride_balance_penalty"])
+                self.logger.record("gait/swing_joint_penalty",info["swing_joint_penalty"])
+                self.logger.record("gait/lateral_penalty",info["lateral_penalty"])
+
+
+                # 新增：保存到实例属性，供 SaveExtraParamsOnBest 使用
+                self.last_gait_data.update({
+                    "left_leg_activity": info["left_leg_activity"],
+                    "right_leg_activity": info["right_leg_activity"],
+                    "foot_bias_penalty": info["foot_bias_penalty"],
+                    "phase_reward": info["phase_reward"],
+                    "activity_difference": info["activity_difference"],
+                    "left_swing_ratio": info["left_swing_ratio"],
+                    "right_swing_ratio": info["right_swing_ratio"],
+                    "left_ratio": info["left_ratio"],
+                    "right_ratio": info["right_ratio"],
+                    "mean_left_swing": info["mean_left_swing"],
+                    "mean_right_swing": info["mean_right_swing"],
+                    "support_sym_penalty":info["support_sym_penalty"],
+                    "lateral_pos": info["lateral_pos"],
+                    "lateral_vel": info["lateral_vel"]
+                })
+        return True
+
+
+class SaveExtraParamsOnBest(BaseCallback):
+    def __init__(self, save_path, leg_callback, verbose=0):
+        super().__init__(verbose)
+        self.save_path = save_path
+        self.leg_callback = leg_callback  # 引用 LegActivityCallback 实例
+        os.makedirs(self.save_path, exist_ok=True)
+        self.log_file = os.path.join(self.save_path, "best_extra_logs.jsonl")
+
+    def _on_step(self) -> bool:
+        if hasattr(self.parent, 'best_mean_reward'):
+            # 1. 从 EvalCallback 获取当前评估的结果
+            eval_mean_reward = getattr(self.parent, 'last_mean_reward', None)
+            if hasattr(self.parent, 'evaluations_length') and self.parent.evaluations_length:
+                eval_mean_ep_length = float(np.mean(self.parent.evaluations_length[-1]))
+            else:
+                eval_mean_ep_length = None
+            # 2. 从 LegActivityCallback 获取最近记录的 gait 数据
+            gait_data = getattr(self.leg_callback, 'last_gait_data', {})
+
+            # 3. 尝试从 logger 获取训练损失（可能已被 dump 清空，作为备选）
+            log_dict = self.model.logger.name_to_value
+
+            extra_data = {
+                "timestep": int(self.num_timesteps),
+                "eval/mean_ep_length": eval_mean_ep_length,
+                "eval/mean_reward": eval_mean_reward,
+                "gait/left_leg_activity": gait_data.get("left_leg_activity"),
+                "gait/right_leg_activity": gait_data.get("right_leg_activity"),
+                "gait/foot_bias_penalty": gait_data.get("foot_bias_penalty"),
+                "gait/phase_reward": gait_data.get("phase_reward"),
+                "gait/activity_difference": gait_data.get("activity_difference"),
+                "gait/left_swing_ratio": gait_data.get("left_swing_ratio"),
+                "gait/right_swing_ratio": gait_data.get("right_swing_ratio"),
+                "gait/left_ratio": gait_data.get("left_ratio"),
+                "gait/right_ratio": gait_data.get("right_ratio"),
+                "gait/mean_left_swing": gait_data.get("mean_left_swing"),
+                "gait/mean_right_swing": gait_data.get("mean_right_swing"),
+                "gait/support_sym_penalty": gait_data.get("support_sym_penalty"),
+                "gait/lateral_pos": gait_data.get("lateral_pos"),
+                "gait/lateral_vel": gait_data.get("lateral_vel")
+            }
+
+            # 追加写入 jsonl
+            with open(self.log_file, "a") as f:
+                f.write(json.dumps(extra_data) + "\n\n")
+
+            if self.verbose > 0:
+                print(f"\n✅ 新最佳模型日志已追加至 {self.log_file}")
+        return True
+
+class SaveBestModelOnNewBest(BaseCallback):
+    """
+    当 EvalCallback 检测到新的最佳模型时，保存一份带时间步的副本。
+    不会覆盖已有文件。
+    """
+    def __init__(self, save_dir, verbose=0):
+        super().__init__(verbose)
+        self.save_dir = save_dir
+        os.makedirs(self.save_dir, exist_ok=True)
+
+    def _on_step(self) -> bool:
+        # 此回调只在 EvalCallback 发现新最佳时被调用
+        if self.model is not None:
+            timestep = self.num_timesteps
+            path = os.path.join(self.save_dir, f"best_model_{timestep}.zip")
+            self.model.save(path)
+            if self.verbose > 0:
+                print(f"✅ 新最佳模型已保存至 {path}")
+        return True
+
+
+class WalkRewardWrapper(Wrapper):
+    """
+    重新设计Humanoid的奖励函数,强调前进速度,降低存活奖励。
+    解决“原地站立”局部最优问题
+    """
+    def __init__(self, env):
+        super().__init__(env)
+        self.prev_x = None  # 用于计算位移
+        self.left_swing_time = 0
+        self.right_swing_time = 0
+        self.forward_weight = 1.5
+        self.healthy_weight = 1.0
+        self.ctrl_cost_weight = 0.005
+        self.fall_penalty_weight = -50.0
+        self.displacement_weight = 0.5
+
+        self.gait_weight = 0.3       # gait reward  
+        self.stride_weight = 1.0
+        self.clearance_weight = 1.5    # 抬脚奖励
+        self.drag_penalty_weight = 0.5 # 脚拖地惩罚权重
+        self.left_contact_prev = True
+        self.right_contact_prev = True
+        self.left_takeoff_x = None
+        self.right_takeoff_x = None
+        self.balance_weight = 0.5    # 支撑稳定
+        # 保存脚位置
+        self.prev_left_x = None
+        self.prev_right_x = None
+        # gait phase
+        self.phase = 0
+        self.phase_frequency = 0.08
+        # 左右脚接触相位差参数初始化
+        self.phase_weight = 2.0
+        self.leg_activity_buffer_size = 50
+        # 左腿角度buffer
+        self.left_hip_angle_buffer = deque(maxlen=self.leg_activity_buffer_size)
+        self.left_knee_angle_buffer = deque(maxlen=self.leg_activity_buffer_size)
+        # 右腿角度buffer
+        self.right_hip_angle_buffer = deque(maxlen=self.leg_activity_buffer_size)
+        self.right_knee_angle_buffer = deque(maxlen=self.leg_activity_buffer_size)
+        # 速度buffer
+        self.left_leg_vel_buffer = deque(maxlen=self.leg_activity_buffer_size)
+        self.right_leg_vel_buffer = deque(maxlen=self.leg_activity_buffer_size)
+        self.activity_rom_weight = 0.6
+        self.activity_vel_weight = 0.4
+        self.activity_diff_penalty_weight = 1.5
+        
+        self.foot_diff_buffer = deque(maxlen=200)
+        self.foot_bias_weight = 0.7
+        self.left_contact_hist = deque(maxlen=50)
+        self.right_contact_hist = deque(maxlen=50)
+
+        self.left_contact_count=0
+        self.right_contact_count=0
+        self.total_steps=0
+        self.left_swing_steps=0
+        self.right_swing_steps=0
+        self.left_swing_total_steps=0
+        self.right_swing_total_steps=0
+        self.left_swing_history=[]
+        self.right_swing_history=[]
+        self.left_stride_history = deque(maxlen=20)   # 最近20次左腿步幅
+        self.right_stride_history = deque(maxlen=20)  # 最近20次右腿步幅
+        self.stride_balance_weight = 0.5              # 惩罚权重，可以调整
+
+        self.leg_joint_ids = None
+        self.last_swing_leg = None   # 记录上一次摆动腿，'left' 或 'right'
+        self.alternate_weight = 1.5
+        
+        self.support_sym_weight = 2.0
+        self.takeoff_weight = 1.5
+        self.lateral_weight = 0.2
+            
+    def compute_hip_phase_reward(self):
+        if len(self.left_hip_angle_buffer) < self.leg_activity_buffer_size:
+            return 0
+        left = np.array(self.left_hip_angle_buffer)
+        right = np.array(self.right_hip_angle_buffer)
+        # 去中心化
+        left = left - left.mean()
+        right = right - right.mean()
+        # 反相关系数
+        corr = np.corrcoef(left, right)[0,1]
+        anti_phase = (1 - corr) / 2.0
+
+        # 活动幅度（用标准差衡量摆动强度）
+        activity = (np.std(left) + np.std(right)) / 2.0
+        activity = np.clip(activity / 0.5, 0, 1)  # 0.5 为典型幅度，需根据实际调整
+
+        reward = anti_phase * activity
+        return reward
+
+    def compute_foot_bias_penalty(self):
+        if len(self.foot_diff_buffer)<120:
+            return 0.0
+        diff=list(self.foot_diff_buffer)[-120:]
+        mean_diff=float(np.mean(diff))
+        std = float(np.std(diff))
+        # bias 表示平均偏差相对于波动的大小
+        bias = abs(mean_diff) / (std+0.05)
+        penalty=np.clip(bias-1.0,0.0,1.0)
+        return penalty
+
+    def compute_leg_activity(self,hip_buffer,knee_buffer,vel_buffer):
+        if len(hip_buffer) < 40:
+            return 0.0
+        # 1. ROM activity
+        hip_rom = (max(hip_buffer)-min(hip_buffer))
+        knee_rom = (max(knee_buffer)-min(knee_buffer))
+        rom_activity = hip_rom + knee_rom
+        # 2. velocity activity
+        vel_activity = np.mean(np.abs(np.array(vel_buffer)))
+        # normalize
+        rom_activity = np.clip(rom_activity / 3.0,0,1)
+        vel_activity = np.clip(vel_activity / 10.0,0,1)
+        # fusion
+        activity = (self.activity_rom_weight *rom_activity+self.activity_vel_weight *vel_activity)
+        return activity
+    
+    def _get_leg_joint_ids(self):
+        if self.leg_joint_ids is not None:
+            return self.leg_joint_ids
+        
+        model = self.env.unwrapped.model
+        joint_names = ["left_hip_x","left_knee",
+                        "right_hip_x","right_knee"]
+        ids={}
+        for name in joint_names:
+            jid=model.joint(name).id
+            ids[name]={
+                    "qpos":model.jnt_qposadr[jid],
+                    "qvel":model.jnt_dofadr[jid]
+                    }
+        return ids
+
+    def reset(self, seed=None, options=None):
+        obs, info = self.env.reset(seed=seed, options=options)
+        
+        self.left_hip_angle_buffer.clear()
+        self.left_knee_angle_buffer.clear()
+        self.right_hip_angle_buffer.clear()
+        self.right_knee_angle_buffer.clear()
+        self.left_leg_vel_buffer.clear()
+        self.right_leg_vel_buffer.clear()
+
+        self.foot_diff_buffer.clear()
+        self.left_contact_hist.clear()
+        self.right_contact_hist.clear()
+        self.prev_x = self.env.unwrapped.data.qpos[0]
+
+        self.left_contact_count = 0
+        self.right_contact_count = 0
+        self.total_steps = 0
+        self.left_swing_steps = 0
+        self.right_swing_steps = 0
+        self.left_swing_total_steps = 0
+        self.right_swing_total_steps = 0
+        self.left_swing_history = []
+        self.right_swing_history = []
+        self.left_stride_history.clear()
+        self.right_stride_history.clear()
+        self.left_contact_prev = True
+        self.right_contact_prev = True
+        self.left_swing_time = 0
+        self.right_swing_time = 0
+        self.last_swing_leg = None
+        return obs, info
+
+    def step(self, action):
+        obs, _, terminated, truncated, info = self.env.step(action)
+        mujoco_env = self.env.unwrapped
+        data = mujoco_env.data
+        x_velocity = data.qvel[0]
+        torso_height = data.qpos[2]   # 使用 qpos
+        # 获取双脚状态
+        left_foot = data.body("left_foot")
+        right_foot = data.body("right_foot")
+        left_z = left_foot.xpos[2]
+        right_z = right_foot.xpos[2]
+        left_x = left_foot.xpos[0]
+        right_x = right_foot.xpos[0]
+        left_contact = (left_z < 0.08)
+        right_contact = (right_z < 0.08)
+        joint_ids=self._get_leg_joint_ids()
+        qvel=data.qvel
+        left_hip_angle = data.qpos[joint_ids["left_hip_x"]["qpos"]]
+        right_hip_angle = data.qpos[joint_ids["right_hip_x"]["qpos"]]
+        left_knee_angle = data.qpos[joint_ids["left_knee"]["qpos"]]
+        right_knee_angle = data.qpos[joint_ids["right_knee"]["qpos"]]
+        left_leg_vel = (abs(qvel[joint_ids["left_hip_x"]["qvel"]])+abs(qvel[joint_ids["left_knee"]["qvel"]]))
+        right_leg_vel = (abs(qvel[joint_ids["right_hip_x"]["qvel"]])+abs(qvel[joint_ids["right_knee"]["qvel"]]))
+        # update angle buffer
+        self.left_hip_angle_buffer.append(left_hip_angle)
+        self.left_knee_angle_buffer.append(left_knee_angle)
+        self.right_hip_angle_buffer.append(right_hip_angle)
+        self.right_knee_angle_buffer.append(right_knee_angle)
+        # velocity activity
+        self.left_leg_vel_buffer.append(left_leg_vel)
+        self.right_leg_vel_buffer.append(right_leg_vel)
+
+        self.total_steps+=1
+        if left_contact:
+            self.left_contact_count+=1
+        if right_contact:
+            self.right_contact_count+=1
+
+        # 速度奖励
+        forward_reward = self.forward_weight * max(0, x_velocity)
+
+        # 高度奖励（维持0.5~1.8）
+        height_reward = self.healthy_weight * max(0, min(torso_height - 1.0, 0.5))
+
+        # 生存奖励（固定低值）
+        survival_bonus = 0.3
+
+        # 控制成本
+        ctrl_cost = self.ctrl_cost_weight * np.square(action).sum()
+
+        # 摔倒惩罚
+        fall_penalty = self.fall_penalty_weight if terminated else 0.0
+
+        #左右脚交替奖励
+        alternate_reward = 0.0
+        if self.left_contact_prev and not left_contact:
+            if self.last_swing_leg != "left":
+                # 左腿开始摆动，如果上一次不是左腿，则交替奖励
+                if self.last_swing_leg is not None:
+                    alternate_reward += 1.0
+                self.last_swing_leg = "left"
+        elif self.right_contact_prev and not right_contact:
+            if self.last_swing_leg != "right":
+                if self.last_swing_leg is not None:
+                    alternate_reward += 1.0
+                self.last_swing_leg = "right"
+        alternate_reward *= self.alternate_weight
+
+        # 抬腿奖励
+        takeoff_reward = 0.0
+        if self.left_contact_prev and not left_contact:
+            takeoff_reward += 0.5   # 左脚离地给奖励
+        if self.right_contact_prev and not right_contact:
+            takeoff_reward += 0.5   # 右脚离地给奖励
+        takeoff_reward *= self.takeoff_weight
+
+
+        # 步幅奖励
+        stride_reward = 0
+        left_stride = 0.0
+        right_stride = 0.0
+        # 左脚事件
+        if self.left_contact_prev and not left_contact:
+            # 左脚离地
+            self.left_takeoff_x = left_x
+        if not self.left_contact_prev and left_contact:
+            # 左脚重新落地
+            left_stride = left_x -self.left_takeoff_x
+            if left_stride>0:
+                stride_reward += np.clip(left_stride / 0.5,0,1)
+                self.left_stride_history.append(max(0,left_stride))
+        # 右脚事件
+        if self.right_contact_prev and not right_contact:
+            self.right_takeoff_x = right_x
+        if not self.right_contact_prev and right_contact:
+            right_stride = (right_x -self.right_takeoff_x)
+            if right_stride>0:
+                stride_reward += np.clip(right_stride / 0.5,0,1)
+                self.right_stride_history.append(max(0,right_stride))
+        self.left_contact_prev = left_contact
+        self.right_contact_prev = right_contact
+        stride_reward *= self.stride_weight
+        # 步幅不平衡惩罚
+        stride_balance_penalty = 0.0
+        if len(self.left_stride_history) >= 5 and len(self.right_stride_history) >= 5:
+            mean_left = np.mean(self.left_stride_history)
+            mean_right = np.mean(self.right_stride_history)
+            # 相对差异，避免整体速度影响
+            avg_stride = (mean_left + mean_right) / 2 + 1e-6
+            stride_balance_penalty = abs(mean_left - mean_right) / avg_stride
+        stride_balance_penalty *= self.stride_balance_weight
+        
+        # 身体稳定奖励
+        quat = data.qpos[3:7]
+        r = Rotation.from_quat([quat[1],quat[2],quat[3],quat[0]])
+        roll,pitch,yaw = r.as_euler("xyz")
+        balance_reward = np.exp(-(abs(pitch)+abs(roll)))
+        orientation_reward=np.exp(-abs(yaw))
+        balance_reward = (self.balance_weight*balance_reward + orientation_reward*0.2)
+
+        # 左右腿角度相位差
+        phase_reward = self.compute_hip_phase_reward()*self.phase_weight
+
+
+        # 腿部关节不对称活动惩罚
+        left_leg_activity = self.compute_leg_activity(
+            self.left_hip_angle_buffer,self.left_knee_angle_buffer,self.left_leg_vel_buffer)
+        right_leg_activity = self.compute_leg_activity(
+            self.right_hip_angle_buffer,self.right_knee_angle_buffer,self.right_leg_vel_buffer)
+        activity_difference = abs(left_leg_activity-right_leg_activity)
+        activity_diff_penalty = (self.activity_diff_penalty_weight*activity_difference) if (not left_contact) or (not right_contact) else 0
+
+
+        # 腿部不摆动惩罚
+        swing_joint_penalty=0
+        swing_forward_reward = 0
+        if not left_contact:
+            self.left_swing_steps+=1
+            self.left_swing_total_steps+=1
+            left_hip_vel = qvel[joint_ids["left_hip_x"]["qvel"]]
+            swing_forward_reward += np.clip(left_hip_vel / 3.0, -0.5, 1)
+            self.left_swing_time += 1
+            if left_leg_vel < 2.0 and self.left_swing_time > 5:
+                swing_joint_penalty += (1.0 - left_leg_vel / 2.0) * 0.2
+        else:
+            if self.left_swing_steps>0:
+                self.left_swing_history.append(self.left_swing_steps)
+                self.left_swing_steps=0
+            self.left_swing_time = 0
+        if not right_contact:
+            self.right_swing_steps+=1
+            self.right_swing_total_steps+=1
+            right_hip_vel = qvel[joint_ids["right_hip_x"]["qvel"]]
+            swing_forward_reward += np.clip(right_hip_vel / 3.0, -0.5, 1)
+            self.right_swing_time += 1
+            if right_leg_vel < 2.0 and self.right_swing_time > 5:
+                swing_joint_penalty += (1.0 - right_leg_vel / 2.0) * 0.2
+        else:
+            self.right_swing_time = 0
+            if self.right_swing_steps>0:
+                self.right_swing_history.append(self.right_swing_steps)
+                self.right_swing_steps=0
+        swing_forward_reward *= 0.5
+        swing_joint_penalty *= 1.0
+
+        # 惩罚长期固定一条腿在前的
+        foot_diff = left_x - right_x
+        self.foot_diff_buffer.append(foot_diff)
+        foot_bias_penalty = self.compute_foot_bias_penalty()*self.foot_bias_weight
+
+        # 左右支撑时间不对称惩罚
+        self.left_contact_hist.append(float(left_contact))
+        self.right_contact_hist.append(float(right_contact))
+        if len(self.left_contact_hist) >= 20:
+            left_support_ratio = np.mean(self.left_contact_hist)
+            right_support_ratio = np.mean(self.right_contact_hist)
+            support_sym_penalty = abs(left_support_ratio - right_support_ratio)
+        else:
+            support_sym_penalty = 0.0
+        support_sym_penalty *= self.support_sym_weight
+
+        # 横向躯干偏移惩罚
+        lateral_penalty = 0
+        lateral_pos = abs(data.qpos[1])      # 躯干横向位置
+        lateral_vel = abs(data.qvel[1])      # 躯干横向速度
+        lateral_penalty = self.lateral_weight*(0.3*lateral_pos + 0.1*lateral_vel)
+
+
+        reward = (forward_reward + 
+                swing_forward_reward +
+                alternate_reward +
+                takeoff_reward +
+                stride_reward +
+                balance_reward +
+                height_reward + 
+                fall_penalty +
+                phase_reward +
+                survival_bonus
+                - stride_balance_penalty
+                - swing_joint_penalty
+                - activity_diff_penalty
+                - foot_bias_penalty
+                - support_sym_penalty
+                - lateral_penalty
+                - ctrl_cost)
+
+        if terminated or truncated:
+            left_ratio=(self.left_contact_count/self.total_steps)
+            right_ratio=(self.right_contact_count/self.total_steps)
+            mean_left_swing=np.mean(self.left_swing_history if len(self.left_swing_history)>0 else 0)
+            mean_right_swing=np.mean(self.right_swing_history if len(self.right_swing_history)>0 else 0)
+            left_swing_ratio =self.left_swing_total_steps/self.total_steps
+            right_swing_ratio =self.right_swing_total_steps/self.total_steps
+
+            info["mean_left_swing"] = mean_left_swing
+            info["mean_right_swing"] = mean_right_swing
+            info["left_ratio"] = left_ratio
+            info["right_ratio"] = right_ratio
+            info["left_swing_ratio"] = left_swing_ratio
+            info["right_swing_ratio"] = right_swing_ratio
+            info["left_leg_activity"] = left_leg_activity
+            info["right_leg_activity"] = right_leg_activity
+            info["phase_reward"]=phase_reward
+            info["activity_difference"]=activity_difference
+            info["foot_bias_penalty"]=foot_bias_penalty
+            info["support_sym_penalty"]=support_sym_penalty
+            info["lateral_pos"]=lateral_pos
+            info["lateral_vel"]=lateral_vel
+
+
+            info["stride_balance_penalty"]=stride_balance_penalty
+            info["swing_joint_penalty"]=swing_joint_penalty            
+            info["lateral_penalty"]=lateral_penalty
+
+
+            # print(self.left_leg_vel_buffer,self.right_leg_vel_buffer,
+            #       self.left_hip_angle_buffer,self.right_hip_angle_buffer,
+            #       self.left_knee_angle_buffer,self.right_knee_angle_buffer)
+
+
+        return obs, reward, terminated, truncated, info
+
+
+def make_env(env_id, rank, seed=0):
+    def _init():
+        env = gym.make(env_id, max_episode_steps=1500)
+        env = WalkRewardWrapper(env)
+        env.reset(seed=seed + rank)
+        return env
+    return _init
+
+
+if __name__ == "__main__":
+    env_id = "Humanoid-v4"
+    n_train_envs = 8    # 训练环境数量
+    n_eval_envs = 1     # 评估环境数量（通常 1 个即可）
+    total_timesteps = 5_000_000
+    seed = 42
+
+    # ---- 训练环境 ----
+    train_vec_env = SubprocVecEnv(
+        [make_env(env_id, i, seed) for i in range(n_train_envs)]
+    )
+    # 如果需要，可以包装 VecMonitor，同时用于训练日志
+    train_vec_env = VecMonitor(train_vec_env)
+
+    # ---- 评估环境（独立） ----
+    eval_vec_env = SubprocVecEnv(
+        [make_env(env_id, n_train_envs + i, seed) for i in range(n_eval_envs)]
+    )
+    # 评估环境也建议用 VecMonitor 包装，方便 EvalCallback 记录
+    eval_vec_env = VecMonitor(eval_vec_env)
+
+    # 策略网络结构（与PPO相同，SAC也支持）
+    policy_kwargs = {
+        'net_arch': [512, 256],
+        'activation_fn': nn.Tanh
+    }
+
+    # ============ SAC 模型 ============
+    # model = SAC(
+    #     'MlpPolicy',
+    #     train_vec_env,
+    #     # learning_rate=lambda prog: 5e-4 * prog + 1e-5 * (1 - prog),  # 线性衰减
+    #     learning_rate=1e-4,
+    #     buffer_size=1_500_000,
+    #     batch_size=1024,
+    #     tau=0.01,
+    #     gamma=0.99,
+    #     train_freq=512,
+    #     gradient_steps=512,
+    #     ent_coef=0.2,              # 固定高熵探索
+    #     # target_entropy="auto",      # 动作维度17
+    #     policy_kwargs=policy_kwargs,
+    #     verbose=1,
+    #     tensorboard_log="./sac_humanoid_walk/"
+    # )
+
+    # ---------- 加载之前保存的模型 ----------
+    model = SAC.load("./best_model/best_model", env=train_vec_env)
+    # old_model = SAC.load("./best_model/best_model", env=train_vec_env)
+    # model.policy.load_state_dict(old_model.policy.state_dict(),strict=False)
+    # model.q_network.load_state_dict(old_model.q_network.state_dict())
+    model.replay_buffer.reset()
+
+    leg_callback = LegActivityCallback()
+    # 回调：达到阈值时停止训练
+    stop_callback = StopTrainingOnRewardThreshold(
+        reward_threshold=100000,
+        verbose=1
+    )
+    extra_log_callback = SaveExtraParamsOnBest(
+        save_path="./best_model/",  # 建议与 best_model_save_path 一致
+        leg_callback=leg_callback,   # 传入
+        verbose=1
+    )
+    save_best_callback = SaveBestModelOnNewBest(
+        save_dir="./best_model/best_model_snapshots/",
+        verbose=1
+    )
+    eval_callback = EvalCallback(
+        eval_vec_env,
+        callback_on_new_best=CallbackList([stop_callback,extra_log_callback,save_best_callback]),
+        best_model_save_path="./best_model/",
+        log_path="./eval_logs/",
+        eval_freq=2000,
+        deterministic=True,
+        render=False
+    )
+
+    model.learn(
+        total_timesteps=total_timesteps,
+        # reset_num_timesteps=False,          # 关键：保持总步数计数，不从头算
+        callback=[eval_callback,leg_callback]
+    )
+    model.save("sac_humanoid_walk_final")
+
+    print("训练完成！模型已保存。")
+    
+    
+    
+    
+Eval num_timesteps=4992000, episode_reward=3148.89 +/- 106.46
+Episode length: 1500.00 +/- 0.00
+----------------------------------------
+| eval/                     |          |
+|    mean_ep_length         | 1.5e+03  |
+|    mean_reward            | 3.15e+03 |
+| gait/                     |          |
+|    activity_difference    | 0.107    |
+|    foot_bias_penalty      | 0.7      |
+|    lateral_penalty        | 0.715    |
+|    lateral_pos            | 11.9     |
+|    lateral_vel            | 0.152    |
+|    left_leg_activity      | 0.731    |
+|    left_ratio             | 0.85     |
+|    left_swing_ratio       | 0.15     |
+|    mean_left_swing        | 5        |
+|    mean_right_swing       | 8.9      |
+|    phase_reward           | 0.316    |
+|    right_leg_activity     | 0.624    |
+|    right_ratio            | 0.59     |
+|    right_swing_ratio      | 0.41     |
+|    stride_balance_penalty | 0.415    |
+|    support_sym_penalty    | 0.32     |
+|    swing_joint_penalty    | 0        |
+| time/                     |          |
+|    total_timesteps        | 4992000  |
+----------------------------------------
+----------------------------------------
+| gait/                     |          |
+|    activity_difference    | 0.0545   |
+|    foot_bias_penalty      | 0.7      |
+|    lateral_penalty        | 0.725    |
+|    lateral_pos            | 11.9     |
+|    lateral_vel            | 0.695    |
+|    left_leg_activity      | 0.712    |
+|    left_ratio             | 0.847    |
+|    left_swing_ratio       | 0.153    |
+|    mean_left_swing        | 5.35     |
+|    mean_right_swing       | 9.07     |
+|    phase_reward           | 0.231    |
+|    right_leg_activity     | 0.657    |
+|    right_ratio            | 0.591    |
+|    right_swing_ratio      | 0.409    |
+|    stride_balance_penalty | 0.317    |
+|    support_sym_penalty    | 0.6      |
+|    swing_joint_penalty    | 0.18     |
+| rollout/                  |          |
+|    ep_len_mean            | 1.14e+03 |
+|    ep_rew_mean            | 2.51e+03 |
+| time/                     |          |
+|    episodes               | 8840     |
+|    fps                    | 107      |
+|    time_elapsed           | 46329    |
+|    total_timesteps        | 4994872  |
+| train/                    |          |
+|    actor_loss             | -135     |
+|    critic_loss            | 31.8     |
+|    ent_coef               | 0.0182   |
+|    ent_coef_loss          | 0.211    |
+|    learning_rate          | 1.07e-05 |
+|    n_updates              | 2269696  |
+----------------------------------------
+----------------------------------------
+| gait/                     |          |
+|    activity_difference    | 0.0859   |
+|    foot_bias_penalty      | 0        |
+|    lateral_penalty        | 0.0221   |
+|    lateral_pos            | 0.35     |
+|    lateral_vel            | 0.0532   |
+|    left_leg_activity      | 0.633    |
+|    left_ratio             | 0.81     |
+|    left_swing_ratio       | 0.19     |
+|    mean_left_swing        | 4        |
+|    mean_right_swing       | 18       |
+|    phase_reward           | 0.188    |
+|    right_leg_activity     | 0.719    |
+|    right_ratio            | 0.316    |
+|    right_swing_ratio      | 0.684    |
+|    stride_balance_penalty | 0        |
+|    support_sym_penalty    | 0.48     |
+|    swing_joint_penalty    | 0        |
+| rollout/                  |          |
+|    ep_len_mean            | 1.13e+03 |
+|    ep_rew_mean            | 2.48e+03 |
+| time/                     |          |
+|    episodes               | 8844     |
+|    fps                    | 107      |
+|    time_elapsed           | 46365    |
+|    total_timesteps        | 4999096  |
+| train/                    |          |
+|    actor_loss             | -135     |
+|    critic_loss            | 30.9     |
+|    ent_coef               | 0.0182   |
+|    ent_coef_loss          | 0.342    |
+|    learning_rate          | 1.03e-05 |
+|    n_updates              | 2270208  |
+----------------------------------------
+训练完成！模型已保存。
